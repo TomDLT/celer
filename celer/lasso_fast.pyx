@@ -13,7 +13,6 @@ from .cython_utils cimport fdot, fasum, faxpy, fnrm2, fcopy, fscal, fposv
 from .cython_utils cimport (primal, dual, create_dual_pt, create_accel_pt,
                             sigmoid, ST, LASSO, LOGREG, dnorm_l1,
                             set_prios)
-ctypedef np.uint8_t uint8
 
 cdef:
     int inc = 1
@@ -60,8 +59,8 @@ def celer(
     cdef bint center = False
     cdef floating old_w_j, X_mean_j, w_Cj
     cdef floating[:] prios = np.empty(n_features, dtype=dtype)
-    cdef uint8[:] screened = np.zeros(n_features, dtype=np.uint8)
-    cdef uint8[:] dummy_screened = np.zeros(1, dtype=np.uint8)
+    cdef int[:] screened = np.zeros(n_features, dtype=np.int32)
+    cdef int[:] dummy_screened = np.zeros(1, dtype=np.int32)
 
 
     # acceleration variables:

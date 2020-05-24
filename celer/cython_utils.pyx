@@ -359,7 +359,7 @@ cpdef void compute_Xw(
 cdef floating dnorm_l1(
         bint is_sparse, floating[:] theta, floating[::1, :] X,
         floating[:] X_data, int[:] X_indices, int[:] X_indptr, int ws_size,
-        int[:] C, uint8[:] screened, floating[:] X_mean, floating[:] weights,
+        int[:] C, int[:] screened, floating[:] X_mean, floating[:] weights,
         bint center, bint positive) nogil:
     """compute norm(X.T.dot(theta) / weights, ord=inf),
     with X restricted to features (columns) with indices in array C.
@@ -424,7 +424,7 @@ cdef void set_prios(
     bint is_sparse, int pb, int n_samples, int n_features, floating * theta,
     floating[::1, :] X, floating[:] X_data, int[:] X_indices, int[:] X_indptr,
     floating * norms_X_col, floating[:] weights, floating * prios,
-    uint8 * screened, floating radius, int * n_screened, bint positive) nogil:
+    int * screened, floating radius, int * n_screened, bint positive) nogil:
     cdef int i, j, startptr, endptr
     cdef floating Xj_theta
 

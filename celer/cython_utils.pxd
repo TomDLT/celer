@@ -3,8 +3,6 @@
 from cython cimport floating
 cimport numpy as np
 
-ctypedef np.uint8_t uint8
-
 cdef int LASSO
 cdef int LOGREG
 
@@ -47,10 +45,10 @@ cpdef void compute_norms_X_col(
 
 cdef floating dnorm_l1(
     bint, floating[:], floating[::1, :], floating[:], int[:],
-    int[:], int, int[:], uint8[:], floating[:], floating[:], bint, bint) nogil
+    int[:], int, int[:], int[:], floating[:], floating[:], bint, bint) nogil
 
 
 cdef void set_prios(
     bint, int, int, int, floating *, floating[::1, :], floating[:], int[:],
-    int[:], floating *, floating[:], floating *, uint8 *, floating, int *,
+    int[:], floating *, floating[:], floating *, int *, floating, int *,
     bint) nogil
