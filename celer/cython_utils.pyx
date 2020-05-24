@@ -356,7 +356,7 @@ cpdef void compute_Xw(
 @cython.boundscheck(False)
 @cython.wraparound(False)
 @cython.cdivision(True)
-cdef floating dnorm_l1(
+cpdef floating dnorm_l1(
         bint is_sparse, floating[:] theta, floating[::1, :] X,
         floating[:] X_data, int[:] X_indices, int[:] X_indptr, int ws_size,
         int[:] C, int[:] screened, floating[:] X_mean, floating[:] weights,
