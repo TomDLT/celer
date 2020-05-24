@@ -334,7 +334,7 @@ def _dnorm_l1(X, theta, weights, X_mean_sparse, positive):
     X_dense, X_data, X_indices, X_indptr = _sparse_and_dense(X)
     # dummy required variables:
     C = np.zeros(1, dtype=np.int32)
-    screened = np.zeros(1, dtype=np.int8)
+    screened = np.zeros(1, dtype=np.int32)
     scal = dnorm_l1(
         sparse.issparse(X), theta, X_dense, X_data, X_indices,
         X_indptr, X.shape[1], C, screened, X_mean_sparse,
