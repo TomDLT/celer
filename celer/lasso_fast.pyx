@@ -11,7 +11,7 @@ from libc.math cimport fabs, sqrt, exp
 
 from .cython_utils cimport fdot, fasum, faxpy, fnrm2, fcopy, fscal, fposv
 from .cython_utils cimport (primal, dual, create_dual_pt, create_accel_pt,
-                            sigmoid, ST, LASSO, LOGREG, compute_dual_scaling,
+                            sigmoid, ST, LASSO, LOGREG, dnorm_l1,
                             set_prios)
 ctypedef np.uint8_t uint8
 
@@ -26,12 +26,15 @@ def celer(
         bint is_sparse, int pb, floating[::1, :] X, floating[:] X_data,
         int[:] X_indices, int[:] X_indptr, floating[:] X_mean,
         floating[:] y, floating alpha, floating[:] w, floating[:] Xw,
-        floating[:] theta, floating[:] norms_X_col, int max_iter,
-        int max_epochs, int gap_freq=10,
+        floating[:] theta, floating[:] norms_X_col, floating[:] weights,
+        int max_iter, int max_epochs, int gap_freq=10,
         float tol=1e-6, int p0=100, int verbose=0,
         int use_accel=1, int prune=0, bint positive=0,
         int better_lc=1):
-    """R/Xw and w are modified in place and assumed to match."""
+    """R/Xw and w are modified in place and assumed to match.
+    Features with weights equal to 0 are ignored.
+    WARNING for Logreg the datafit is a sum, while for Lasso it is a mean.
+    """
     assert pb in (LASSO, LOGREG)
 
     if floating is double:
@@ -80,7 +83,7 @@ def celer(
     if pb == LOGREG:
         inv_lc = 4. / np.asarray(norms_X_col) ** 2
     else:
-        inv_lc = 1. / np.asarray(norms_X_col) ** 2
+        inv_lc = n_samples / np.asarray(norms_X_col) ** 2
 
 
     cdef floating norm_y2 = fnrm2(&n_samples, &y[0], &inc) ** 2
@@ -99,10 +102,9 @@ def celer(
         if t != 0:
             create_dual_pt(pb, n_samples, alpha, &theta[0], &Xw[0], &y[0])
 
-            scal = compute_dual_scaling(
-                is_sparse, pb, n_features, n_samples, &theta[0], X, X_data,
-                X_indices, X_indptr, n_features, &dummy_C[0], &screened[0],
-                X_mean, center, positive)
+            scal = dnorm_l1(
+                is_sparse, theta, X, X_data, X_indices, X_indptr, n_features,
+                dummy_C, screened, X_mean, weights, center, positive)
 
             if scal > 1. :
                 tmp = 1. / scal
@@ -111,10 +113,10 @@ def celer(
             d_obj = dual(pb, n_samples, alpha, norm_y2, &theta[0], &y[0])
 
             # also test dual point returned by inner solver after 1st iter:
-            scal = compute_dual_scaling(
-                is_sparse, pb, n_features, n_samples, &theta_in[0],
-                X, X_data, X_indices, X_indptr,
-                n_features, &dummy_C[0], &screened[0], X_mean, center, positive)
+            scal = dnorm_l1(
+                is_sparse, theta_in, X, X_data, X_indices, X_indptr,
+                n_features, dummy_C, screened, X_mean, weights, center,
+                positive)
             if scal > 1.:
                 tmp = 1. / scal
                 fscal(&n_samples, &tmp, &theta_in[0], &inc)
@@ -132,7 +134,8 @@ def celer(
             highest_d_obj = d_obj
             # TODO implement a best_theta
 
-        p_obj = primal(pb, alpha, n_samples, &Xw[0], &y[0], n_features, &w[0])
+        p_obj = primal(pb, alpha, n_samples, &Xw[0], &y[0], n_features,
+                       &w[0], &weights[0])
         gap = p_obj - highest_d_obj
         gaps[t] = gap
 
@@ -151,8 +154,8 @@ def celer(
 
         set_prios(
             is_sparse, pb, n_samples, n_features, &theta[0], X, X_data,
-            X_indices, X_indptr, &norms_X_col[0], &prios[0], &screened[0],
-            radius, &n_screened, positive)
+            X_indices, X_indptr, &norms_X_col[0], weights, &prios[0],
+            &screened[0], radius, &n_screened, positive)
 
         if prune:
             nnz = 0
@@ -205,10 +208,10 @@ def celer(
                 create_dual_pt(
                     pb, n_samples, alpha, &theta_in[0], &Xw[0], &y[0])
 
-                scal = compute_dual_scaling(
-                    is_sparse, pb, n_features, n_samples, &theta_in[0], X,
-                    X_data, X_indices, X_indptr, ws_size, &C[0],
-                    &dummy_screened[0], X_mean, center, positive)
+                scal = dnorm_l1(
+                    is_sparse, theta_in, X, X_data, X_indices, X_indptr,
+                    ws_size, C, dummy_screened, X_mean, weights, center,
+                    positive)
 
                 if scal > 1. :
                     tmp = 1. / scal
@@ -226,10 +229,10 @@ def celer(
                         print("linear system solving failed")
 
                     if epoch // gap_freq >= K:
-                        scal = compute_dual_scaling(
-                            is_sparse, pb, n_features, n_samples, &thetacc[0],
-                            X, X_data, X_indices, X_indptr, ws_size, &C[0],
-                            &dummy_screened[0], X_mean, center, positive)
+                        scal = dnorm_l1(
+                            is_sparse, thetacc, X, X_data, X_indices, X_indptr,
+                            ws_size, C, dummy_screened, X_mean, weights,
+                            center, positive)
 
                         if scal > 1. :
                             tmp = 1. / scal
@@ -248,8 +251,8 @@ def celer(
                 # CAUTION: code does not yet  include a best_theta.
                 # Can be an issue in screening: dgap and theta might disagree.
 
-                p_obj_in = primal(
-                    pb, alpha, n_samples, &Xw[0], &y[0], n_features, &w[0])
+                p_obj_in = primal(pb, alpha, n_samples, &Xw[0], &y[0],
+                                  n_features, &w[0], &weights[0])
                 gap_in = p_obj_in - highest_d_obj_in
 
                 if verbose_in:
@@ -263,7 +266,7 @@ def celer(
 
             for k in range(ws_size):
                 j = C[k]
-                if norms_X_col[j] == 0.:
+                if norms_X_col[j] == 0. or weights[j] == 0.:
                     continue
                 old_w_j = w[j]
                 if pb == LASSO:
@@ -282,12 +285,10 @@ def celer(
                         w[j] += fdot(&n_samples, &X[0, j], &inc, &Xw[0],
                                      &inc) / norms_X_col[j] ** 2
 
-                    # perform ST in place:
                     if positive and w[j] <= 0.:
                         w[j] = 0.
                     else:
-                        w[j] = ST(w[j],
-                                  alpha / norms_X_col[j] ** 2 * n_samples)
+                        w[j] = ST(w[j], alpha * inv_lc[j] * weights[j])
 
                     # R -= (w_j - old_w_j) * (X[:, j] - X_mean[j])
                     tmp = old_w_j - w[j]
@@ -331,7 +332,8 @@ def celer(
                         for i in range(n_samples):
                             tmp += X[i, j] * y[i] * sigmoid(- y[i] * Xw[i])
 
-                    w[j] = ST(w[j] + tmp * inv_lc[j], alpha * inv_lc[j])
+                    w[j] = ST(w[j] + tmp * inv_lc[j],
+                              alpha * inv_lc[j] * weights[j])
 
                     tmp = w[j] - old_w_j
                     if tmp != 0.:

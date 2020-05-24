@@ -14,7 +14,7 @@ from sklearn.linear_model._base import _preprocess_data
 
 from .lasso_fast import celer
 from .group_fast import celer_grp, dnorm_grp
-from .cython_utils import compute_norms_X_col, compute_Xw
+from .cython_utils import compute_norms_X_col, compute_Xw, dnorm_l1
 from .multitask_fast import celer_mtl
 from .PN_logreg import newton_celer
 
@@ -25,7 +25,7 @@ GRPLASSO = 2
 
 def celer_path(X, y, pb, eps=1e-3, n_alphas=100, alphas=None,
                coef_init=None, max_iter=20, gap_freq=10, max_epochs=50000,
-               p0=10, verbose=0, tol=1e-6, prune=0,
+               p0=10, verbose=0, tol=1e-6, prune=True, weights=None,
                groups=None, return_thetas=False, use_PN=False, X_offset=None,
                X_scale=None, return_n_iter=False, positive=False):
     r"""Compute optimization path with Celer as inner solver.
@@ -164,13 +164,17 @@ def celer_path(X, y, pb, eps=1e-3, n_alphas=100, alphas=None,
     if X_offset is not None:
         # As sparse matrices are not actually centered we need this
         # to be passed to the CD solver.
-        X_sparse_scaling = X_offset / X_scale
-        X_sparse_scaling = np.asarray(X_sparse_scaling, dtype=X.dtype)
+        X_mean_sparse = X_offset / X_scale
+        X_mean_sparse = np.asarray(X_mean_sparse, dtype=X.dtype)
     else:
-        X_sparse_scaling = np.zeros(n_features, dtype=X.dtype)
+        X_mean_sparse = np.zeros(n_features, dtype=X.dtype)
+
+    X_dense, X_data, X_indices, X_indptr = _sparse_and_dense(X)
+    if weights is None:
+        weights = np.ones(n_groups) if pb == GRPLASSO else np.ones(n_features)
 
     if alphas is None:
-        # TODO this is wrong is X_sparse_scaling is used
+        # TODO this is wrong is X_mean_sparse is used
         if pb == LASSO:
             if positive:
                 alpha_max = np.max(X.T.dot(y)) / n_samples
@@ -200,8 +204,6 @@ def celer_path(X, y, pb, eps=1e-3, n_alphas=100, alphas=None,
     if return_n_iter:
         n_iters = np.zeros(n_alphas, dtype=int)
 
-    X_dense, X_data, X_indices, X_indptr = _sparse_and_dense(X)
-
     if pb == GRPLASSO:
         # TODO this must be included in compute_norm_Xcols when centering
         norms_X_grp = np.zeros(n_groups, dtype=X_dense.dtype)
@@ -213,11 +215,11 @@ def celer_path(X, y, pb, eps=1e-3, n_alphas=100, alphas=None,
                 for j1 in range(grp_ptr[g], grp_ptr[g + 1]):
                     for j2 in range(grp_ptr[g], grp_ptr[g + 1]):
                         gram[j1 - grp_ptr[g], j2 - grp_ptr[g]] += \
-                            X_sparse_scaling[j1] * \
-                            X_sparse_scaling[j2] * n_samples - \
-                            X_sparse_scaling[j1] * \
+                            X_mean_sparse[j1] * \
+                            X_mean_sparse[j2] * n_samples - \
+                            X_mean_sparse[j1] * \
                             X_data[X_indptr[j2]:X_indptr[j2+1]].sum() - \
-                            X_sparse_scaling[j2] * \
+                            X_mean_sparse[j2] * \
                             X_data[X_indptr[j1]:X_indptr[j1+1]].sum()
 
                 norms_X_grp[g] = np.sqrt(norm(gram, ord=2))
@@ -228,7 +230,7 @@ def celer_path(X, y, pb, eps=1e-3, n_alphas=100, alphas=None,
         norms_X_col = np.zeros(n_features, dtype=X_dense.dtype)
         compute_norms_X_col(
             is_sparse, norms_X_col, n_samples, X_dense, X_data,
-            X_indices, X_indptr, X_sparse_scaling)
+            X_indices, X_indptr, X_mean_sparse)
 
     # do not skip alphas[0], it is not always alpha_max
     for t in range(n_alphas):
@@ -249,38 +251,41 @@ def celer_path(X, y, pb, eps=1e-3, n_alphas=100, alphas=None,
                 # y - Xw for Lasso, Xw for Logreg:
                 Xw = np.zeros(n_samples, dtype=X.dtype)
                 compute_Xw(
-                    is_sparse, pb, Xw, w, y, X_sparse_scaling.any(), X_dense,
-                    X_data, X_indices, X_indptr, X_sparse_scaling)
+                    is_sparse, pb, Xw, w, y, X_mean_sparse.any(), X_dense,
+                    X_data, X_indices, X_indptr, X_mean_sparse)
             else:
                 w = np.zeros(n_features, dtype=X.dtype)
                 Xw = np.zeros(n_samples, X.dtype) if pb == LOGREG else y.copy()
 
-            if pb == LASSO:
-                theta = Xw / np.linalg.norm(X.T.dot(Xw), ord=np.inf)
+            # different link equations and noramlization scal for dual point:
+            if pb in (LASSO, LOGREG):
+                if pb == LASSO:
+                    theta = Xw.copy()
+                elif pb == LOGREG:
+                    theta = y / (1 + np .exp(y * Xw)) / alpha
+                scal = _dnorm_l1(X, theta, weights, X_mean_sparse, positive)
             elif pb == GRPLASSO:
                 theta = Xw.copy()
                 scal = dnorm_grp(
                     is_sparse, theta, grp_ptr, grp_indices, X_dense,
-                    X_data, X_indices, X_indptr, X_sparse_scaling,
+                    X_data, X_indices, X_indptr, X_mean_sparse,
                     len(grp_ptr) - 1, np.zeros(1, dtype=np.int32),
-                    X_sparse_scaling.any())
-                theta /= scal
-            elif pb == LOGREG:
-                theta = y / (1 + np .exp(y * Xw)) / alpha
-                theta /= np.linalg.norm(X.T @ theta, ord=np.inf)
+                    X_mean_sparse.any())
+            theta /= scal
+
         # celer modifies w, Xw, and theta in place:
         if pb == GRPLASSO:  # TODO this if else scheme is complicated
             sol = celer_grp(
                 is_sparse, LASSO, X_dense, grp_indices, grp_ptr, X_data,
                 X_indices,
-                X_indptr, X_sparse_scaling, y, alpha, w, Xw, theta,
+                X_indptr, X_mean_sparse, y, alpha, w, Xw, theta,
                 norms_X_grp, tol, max_iter, max_epochs, gap_freq, p0=p0,
                 prune=prune, verbose=verbose)
         elif pb == LASSO or (pb == LOGREG and not use_PN):
             sol = celer(
                 is_sparse, pb,
-                X_dense, X_data, X_indices, X_indptr, X_sparse_scaling, y,
-                alpha, w, Xw, theta, norms_X_col,
+                X_dense, X_data, X_indices, X_indptr, X_mean_sparse, y,
+                alpha, w, Xw, theta, norms_X_col, weights,
                 max_iter=max_iter, gap_freq=gap_freq, max_epochs=max_epochs,
                 p0=p0, verbose=verbose, use_accel=1, tol=tol, prune=prune,
                 positive=positive)
@@ -324,18 +329,31 @@ def _sparse_and_dense(X):
     return X_dense, X_data, X_indices, X_indptr
 
 
+def _dnorm_l1(X, theta, weights, X_mean_sparse, positive):
+    """Theta should be centered."""
+    X_dense, X_data, X_indices, X_indptr = _sparse_and_dense(X)
+    # dummy required variables:
+    C = np.zeros(1, dtype=np.int32)
+    screened = np.zeros(1, dtype=np.int8)
+    scal = dnorm_l1(
+        sparse.issparse(X), theta, X_dense, X_data, X_indices,
+        X_indptr, X.shape[1], C, screened, X_mean_sparse,
+        weights, X_mean_sparse.any(), positive)
+    return scal
+
+
 def _alpha_max_grp(X, y, groups, center=False, normalize=False):
-    """This costly function  (copies X) should only be used for debug."""
+    """This costly function (copies X) should only be used for debug."""
     grp_ptr, grp_indices = _grp_converter(groups, X.shape[1])
     X, y, X_offset, _, X_scale = _preprocess_data(
         X, y, center, normalize, copy=True)
 
-    X_mean = X_offset / X_scale
+    X_mean_sparse = X_offset / X_scale
     X_dense, X_data, X_indices, X_indptr = _sparse_and_dense(X)
     alpha_max = dnorm_grp(
         sparse.issparse(X), y, grp_ptr, grp_indices, X_dense, X_data,
-        X_indices, X_indptr, X_mean, len(grp_ptr) - 1,
-        np.zeros(1, dtype=np.int32), X_mean.any()) / len(y)
+        X_indices, X_indptr, X_mean_sparse, len(grp_ptr) - 1,
+        np.zeros(1, dtype=np.int32), X_mean_sparse.any()) / len(y)
 
     return alpha_max
 

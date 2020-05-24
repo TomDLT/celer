@@ -119,13 +119,16 @@ cdef inline floating sigmoid(floating x) nogil:
 @cython.boundscheck(False)
 @cython.wraparound(False)
 @cython.cdivision(True)
-cdef floating primal_logreg(floating alpha, int n_samples, floating * Xw,
-                            floating * y, int n_features, floating * w) nogil:
+cdef floating primal_logreg(
+    floating alpha, int n_samples, floating * Xw, floating * y, int n_features,
+    floating * w, floating * weights) nogil:
     cdef int inc = 1
-    cdef floating p_obj = alpha * fasum(&n_features, &w[0], &inc)
-    cdef int i = 0
+    cdef floating p_obj = 0.
+    cdef int i, j
     for i in range(n_samples):
         p_obj += log_1pexp(- y[i] * Xw[i])
+    for j in range(n_features):
+        p_obj += alpha * weights[j] * fabs(w[j])
     return p_obj
 
 
@@ -133,22 +136,27 @@ cdef floating primal_logreg(floating alpha, int n_samples, floating * Xw,
 @cython.boundscheck(False)
 @cython.wraparound(False)
 @cython.cdivision(True)
-cdef floating primal_lasso(floating alpha, int n_samples, floating * R,
-                         int n_features, floating * w) nogil:
+cdef floating primal_lasso(
+        floating alpha, int n_samples, floating * R, int n_features,
+        floating * w, floating * weights) nogil:
     cdef int inc = 1
-    cdef floating p_obj = alpha * fasum(&n_features, w, &inc)
-    p_obj += fdot(&n_samples, R, &inc, R, &inc) / (2. * n_samples)
+    cdef int j
+    cdef floating p_obj = 0.
+    p_obj = fdot(&n_samples, R, &inc, R, &inc) / (2. * n_samples)
+    for j in range(n_features):
+        p_obj += alpha * weights[j] * fabs(w[j])
     return p_obj
 
 
 cdef floating primal(
     int pb, floating alpha, int n_samples, floating * R, floating * y,
-    int n_features, floating * w) nogil:
+    int n_features, floating * w, floating * weights) nogil:
     if pb == LASSO:
-        return primal_lasso(alpha, n_samples, &R[0], n_features, &w[0])
+        return primal_lasso(alpha, n_samples, &R[0], n_features, &w[0],
+                            weights)
     else:
-        return primal_logreg(alpha, n_samples, &R[0], &y[0],  n_features,
-                             &w[0])
+        return primal_logreg(alpha, n_samples, &R[0], &y[0], n_features,
+                             &w[0], weights)
 
 
 @cython.boundscheck(False)
@@ -348,28 +356,29 @@ cpdef void compute_Xw(
 @cython.boundscheck(False)
 @cython.wraparound(False)
 @cython.cdivision(True)
-cdef floating compute_dual_scaling(
-        bint is_sparse, int pb, int n_features, int n_samples,
-        floating * theta, floating[::1, :] X, floating[:] X_data,
-        int[:] X_indices, int[:] X_indptr, int ws_size, int * C,
-        uint8 * screened, floating[:] X_mean, bint center, bint positive) nogil:
-    """compute norm(X.T.dot(theta), ord=inf),
+cdef floating dnorm_l1(
+        bint is_sparse, floating[:] theta, floating[::1, :] X,
+        floating[:] X_data, int[:] X_indices, int[:] X_indptr, int ws_size,
+        int[:] C, uint8[:] screened, floating[:] X_mean, floating[:] weights,
+        bint center, bint positive) nogil:
+    """compute norm(X.T.dot(theta) / weights, ord=inf),
     with X restricted to features (columns) with indices in array C.
-    if ws_size == n_features, C=np.arange(n_features is used)"""
+    if ws_size == n_features, C=np.arange(n_features) is used"""
+    cdef int n_features = weights.shape[0]
+    cdef int n_samples = theta.shape[0]
     cdef floating Xj_theta
     cdef floating scal = 0.
     cdef floating theta_sum = 0.
     cdef int i, j, Cj, startptr, endptr
-    # TODO variable pb is not used
 
     if is_sparse:
         if center:
             for i in range(n_samples):
                 theta_sum += theta[i]
 
-    if ws_size == n_features: # scaling wrt all features
+    if ws_size == n_features: # max over all features
         for j in range(n_features):
-            if screened[j]:
+            if screened[j] or weights[j] == 0.:
                 continue
             if is_sparse:
                 startptr = X_indptr[j]
@@ -384,10 +393,12 @@ cdef floating compute_dual_scaling(
 
             if not positive:
                 Xj_theta = fabs(Xj_theta)
-            scal = max(scal, Xj_theta)
-    else: # scaling wrt features in C only
+            scal = max(scal, Xj_theta / weights[j])
+    else: # max over features in C only
         for j in range(ws_size):
             Cj = C[j]
+            if weights[Cj] == 0.:
+                continue
             if is_sparse:
                 startptr = X_indptr[Cj]
                 endptr = X_indptr[Cj + 1]
@@ -402,7 +413,7 @@ cdef floating compute_dual_scaling(
             if not positive:
                 Xj_theta = fabs(Xj_theta)
 
-            scal = max(scal, Xj_theta)
+            scal = max(scal, Xj_theta / weights[Cj])
     return scal
 
 
@@ -412,14 +423,16 @@ cdef floating compute_dual_scaling(
 cdef void set_prios(
     bint is_sparse, int pb, int n_samples, int n_features, floating * theta,
     floating[::1, :] X, floating[:] X_data, int[:] X_indices, int[:] X_indptr,
-    floating * norms_X_col, floating * prios, uint8 * screened, floating radius,
-    int * n_screened, bint positive) nogil:
+    floating * norms_X_col, floating[:] weights, floating * prios,
+    uint8 * screened, floating radius, int * n_screened, bint positive) nogil:
     cdef int i, j, startptr, endptr
     cdef floating Xj_theta
 
-    #TODO we do not substract theta_sum, which seems to indicate that theta is always centered...
+    # TODO we do not substract theta_sum, which seems to indicate that theta
+    # is always centered...
     for j in range(n_features):
-        if screened[j] or norms_X_col[j] == 0.:
+        if screened[j] or norms_X_col[j] == 0. or weights[j] == 0.:
+            # TODO weights 0 (unpenalized, included) vs -1 (excluded) ?
             prios[j] = 10000
             continue
         if is_sparse:
@@ -430,6 +443,8 @@ cdef void set_prios(
                 Xj_theta += theta[X_indices[i]] * X_data[i]
         else:
             Xj_theta = fdot(&n_samples, &theta[0], &inc, &X[0, j], &inc)
+
+        Xj_theta /= weights[j]
 
         if positive:
             prios[j] = fabs(Xj_theta - 1.) / norms_X_col[j]
